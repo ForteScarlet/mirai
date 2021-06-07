@@ -1,294 +1,210 @@
-@file:Suppress("UnstableApiUsage", "UNUSED_VARIABLE")
+/*
+ * Copyright 2019-2021 Mamoe Technologies and contributors.
+ *
+ *  此源代码的使用受 GNU AFFERO GENERAL PUBLIC LICENSE version 3 许可证的约束, 可以在以下链接找到该许可证.
+ *  Use of this source code is governed by the GNU AGPLv3 license that can be found through the following link.
+ *
+ *  https://github.com/mamoe/mirai/blob/master/LICENSE
+ */
 
-import org.jetbrains.dokka.gradle.DokkaTask
-import java.time.Duration
-import kotlin.math.pow
+@file:Suppress("UnstableApiUsage", "UNUSED_VARIABLE", "NULLABILITY_MISMATCH_BASED_ON_JAVA_ANNOTATIONS")
+
+import com.github.jengelman.gradle.plugins.shadow.tasks.ShadowJar
+import org.jetbrains.kotlin.gradle.dsl.KotlinMultiplatformExtension
+import org.jetbrains.kotlin.gradle.plugin.KotlinPlatformType
 
 buildscript {
     repositories {
-        mavenLocal()
+//        mavenLocal()
         // maven(url = "https://mirrors.huaweicloud.com/repository/maven")
-        maven(url = "https://dl.bintray.com/kotlin/kotlin-eap")
-        maven(url = "https://kotlin.bintray.com/kotlinx")
-        jcenter()
-        google()
         mavenCentral()
+        google()
+        jcenter()
     }
 
     dependencies {
-        classpath("com.github.jengelman.gradle.plugins:shadow:5.2.0")
-        classpath("com.android.tools.build:gradle:${Versions.Android.androidGradlePlugin}")
-        classpath("org.jetbrains.kotlin:kotlin-gradle-plugin:${Versions.Kotlin.compiler}")
-        classpath("org.jetbrains.kotlin:kotlin-serialization:${Versions.Kotlin.compiler}")
-        classpath("org.jetbrains.kotlinx:atomicfu-gradle-plugin:${Versions.Kotlin.atomicFU}")
-        classpath("org.jetbrains.kotlinx:binary-compatibility-validator:${Versions.Kotlin.binaryValidator}")
+        classpath("com.android.tools.build:gradle:${Versions.androidGradlePlugin}")
+        classpath("org.jetbrains.kotlinx:atomicfu-gradle-plugin:${Versions.atomicFU}")
+        classpath("org.jetbrains.kotlinx:binary-compatibility-validator:${Versions.binaryValidator}")
     }
 }
 
 plugins {
-    id("org.jetbrains.dokka") version Versions.Kotlin.dokka apply false
-    id("net.mamoe.kotlin-jvm-blocking-bridge") version Versions.blockingBridge apply false
-    // id("com.jfrog.bintray") version Versions.Publishing.bintray apply false
+    kotlin("jvm") // version Versions.kotlinCompiler
+    kotlin("plugin.serialization") version Versions.kotlinCompiler
+//    id("org.jetbrains.dokka") version Versions.dokka
+    id("net.mamoe.kotlin-jvm-blocking-bridge") version Versions.blockingBridge
+    id("com.gradle.plugin-publish") version "0.12.0" apply false
 }
 
 // https://github.com/kotlin/binary-compatibility-validator
-//apply(plugin = "binary-compatibility-validator")
+apply(plugin = "binary-compatibility-validator")
 
-
-project.ext.set("isAndroidSDKAvailable", false)
-
-// until
-// https://youtrack.jetbrains.com/issue/KT-37152,
-// are fixed.
-
-/*
-runCatching {
-    val keyProps = Properties().apply {
-        file("local.properties").takeIf { it.exists() }?.inputStream()?.use { load(it) }
+configure<kotlinx.validation.ApiValidationExtension> {
+    allprojects.forEach { subproject ->
+        ignoredProjects.add(subproject.name)
     }
-    if (keyProps.getProperty("sdk.dir", "").isNotEmpty()) {
-        project.ext.set("isAndroidSDKAvailable", true)
-    } else {
-        project.ext.set("isAndroidSDKAvailable", false)
-    }
-}.exceptionOrNull()?.run {
-    project.ext.set("isAndroidSDKAvailable", false)
-}*/
+    ignoredProjects.remove("binary-compatibility-validator")
+    ignoredProjects.remove("binary-compatibility-validator-android")
+    // Enable validator for module `binary-compatibility-validator` and `-android` only.
+
+
+    ignoredPackages.add("net.mamoe.mirai.internal")
+    ignoredPackages.add("net.mamoe.mirai.console.internal")
+    nonPublicMarkers.add("net.mamoe.mirai.utils.MiraiInternalApi")
+    nonPublicMarkers.add("net.mamoe.mirai.utils.MiraiInternalFile")
+    nonPublicMarkers.add("net.mamoe.mirai.console.utils.ConsoleInternalApi")
+    nonPublicMarkers.add("net.mamoe.mirai.console.utils.ConsoleExperimentalApi")
+    nonPublicMarkers.add("net.mamoe.mirai.utils.MiraiExperimentalApi")
+}
+
+GpgSigner.setup(project)
+
+tasks.register("publishMiraiCoreArtifactsToMavenLocal") {
+    group = "mirai"
+    dependsOn(
+        project(":mirai-core-api").tasks.getByName("publishToMavenLocal"),
+        project(":mirai-core-utils").tasks.getByName("publishToMavenLocal"),
+        project(":mirai-core").tasks.getByName("publishToMavenLocal")
+    )
+}
+
+analyzes.CompiledCodeVerify.run { registerAllVerifyTasks() }
+postktcompile.PostKotlinCompile.run { registerForAll(rootProject) }
 
 allprojects {
     group = "net.mamoe"
-    version = Versions.Mirai.version
+    version = Versions.project
 
     repositories {
-        mavenLocal()
+        // mavenLocal() // cheching issue cause compiler exception
         // maven(url = "https://mirrors.huaweicloud.com/repository/maven")
-        maven(url = "https://dl.bintray.com/kotlin/kotlin-eap")
-        maven(url = "https://kotlin.bintray.com/kotlinx")
         jcenter()
         google()
         mavenCentral()
     }
+
+    afterEvaluate {
+        configureJvmTarget()
+        configureMppShadow()
+        configureEncoding()
+        configureKotlinTestSettings()
+        configureKotlinExperimentalUsages()
+
+        runCatching {
+            blockingBridge {
+                unitCoercion = net.mamoe.kjbb.compiler.UnitCoercion.COMPATIBILITY
+            }
+        }
+
+        //  useIr()
+
+        if (isKotlinJvmProject) {
+            configureFlattenSourceSets()
+        }
+    }
 }
 
 subprojects {
-    if (this@subprojects.name == "java-test") {
-        return@subprojects
-    }
     afterEvaluate {
-        apply(plugin = "com.github.johnrengelman.shadow")
-        val kotlin =
-            runCatching {
-                (this as ExtensionAware).extensions.getByName("kotlin") as? org.jetbrains.kotlin.gradle.dsl.KotlinMultiplatformExtension
-            }.getOrNull() ?: return@afterEvaluate
+        if (project.name == "mirai-core-api") configureDokka()
+        if (project.name == "mirai-console") configureDokka()
+    }
+}
 
-        val shadowJvmJar by tasks.creating(com.github.jengelman.gradle.plugins.shadow.tasks.ShadowJar::class) {
+tasks.register("cleanExceptIntellij") {
+    group = "build"
+    allprojects.forEach { proj ->
+        if (proj.name != "mirai-console-intellij") {
+
+            // Type mismatch
+            // proj.tasks.findByName("clean")?.let(::dependsOn)
+
+            proj.tasks.findByName("clean")?.let { dependsOn(it) }
+        }
+    }
+}
+
+extensions.findByName("buildScan")?.withGroovyBuilder {
+    setProperty("termsOfServiceUrl", "https://gradle.com/terms-of-service")
+    setProperty("termsOfServiceAgree", "yes")
+}
+
+fun Project.useIr() {
+    kotlinCompilations?.forEach { kotlinCompilation ->
+        kotlinCompilation.kotlinOptions.freeCompilerArgs += "-Xuse-ir"
+    }
+}
+
+fun Project.configureDokka() {
+//    apply(plugin = "org.jetbrains.dokka")
+//    tasks {
+//        val dokkaHtml by getting(org.jetbrains.dokka.gradle.DokkaTask::class) {
+//            outputDirectory.set(buildDir.resolve("dokka"))
+//        }
+//        val dokkaGfm by getting(org.jetbrains.dokka.gradle.DokkaTask::class) {
+//            outputDirectory.set(buildDir.resolve("dokka-gfm"))
+//        }
+//    }
+//    tasks.withType<org.jetbrains.dokka.gradle.DokkaTask>().configureEach {
+//        dokkaSourceSets.configureEach {
+//            perPackageOption {
+//                matchingRegex.set("net\\.mamoe\\.mirai\\.*")
+//                skipDeprecated.set(true)
+//            }
+//
+//            for (suppressedPackage in arrayOf(
+//                """net.mamoe.mirai.internal""",
+//                """net.mamoe.mirai.internal.message""",
+//                """net.mamoe.mirai.internal.network""",
+//                """net.mamoe.mirai.console.internal""",
+//                """net.mamoe.mirai.console.compiler.common"""
+//            )) {
+//                perPackageOption {
+//                    matchingRegex.set(suppressedPackage.replace(".", "\\."))
+//                    suppress.set(true)
+//                }
+//            }
+//        }
+//    }
+}
+
+fun Project.configureMppShadow() {
+    val kotlin =
+        runCatching {
+
+            (this as ExtensionAware).extensions.getByName("kotlin") as? KotlinMultiplatformExtension
+        }.getOrNull() ?: return
+
+    if (project.configurations.findByName("jvmRuntimeClasspath") != null) {
+        val shadowJvmJar by tasks.creating(ShadowJar::class) sd@{
             group = "mirai"
+            archiveClassifier.set("-all")
 
             val compilations =
-                kotlin.targets.filter { it.platformType == org.jetbrains.kotlin.gradle.plugin.KotlinPlatformType.jvm }
+                kotlin.targets.filter { it.platformType == KotlinPlatformType.jvm }
                     .map { it.compilations["main"] }
 
             compilations.forEach {
                 dependsOn(it.compileKotlinTask)
-            }
-
-            compilations.forEach {
                 from(it.output)
             }
-            configurations = compilations.map { it.compileDependencyFiles as Configuration }
+
+            from(project.configurations.findByName("jvmRuntimeClasspath"))
 
             this.exclude { file ->
                 file.name.endsWith(".sf", ignoreCase = true)
-                    .also { if (it) println("excluded ${file.name}") }
-            }
-            this.manifest {
-                this.attributes(
-                    "Manifest-Version" to 1,
-                    "Implementation-Vendor" to "Mamoe Technologies",
-                    "Implementation-Title" to this@afterEvaluate.name.toString(),
-                    "Implementation-Version" to this@afterEvaluate.version.toString()
-                )
-            }
-        }
-
-        val githubUpload by tasks.creating {
-            group = "mirai"
-            dependsOn(shadowJvmJar)
-
-            doFirst {
-                timeout.set(Duration.ofHours(3))
-                findLatestFile().let { (_, file) ->
-                    val filename = file.name
-                    println("Uploading file $filename")
-                    runCatching {
-                        upload.GitHub.upload(
-                            file,
-                            project,
-                            "mirai-repo",
-                            "shadow/${project.name}/$filename"
-                        )
-                    }.exceptionOrNull()?.let {
-                        System.err.println("GitHub Upload failed")
-                        it.printStackTrace() // force show stacktrace
-                        throw it
-                    }
-                }
-            }
-        }
-
-        apply(plugin = "org.jetbrains.dokka")
-        this.tasks {
-            val dokka by getting(DokkaTask::class) {
-                outputFormat = "html"
-                outputDirectory = "$buildDir/dokka"
-            }
-            val dokkaMarkdown by creating(DokkaTask::class) {
-                outputFormat = "markdown"
-                outputDirectory = "$buildDir/dokka-markdown"
-            }
-            val dokkaGfm by creating(DokkaTask::class) {
-                outputFormat = "gfm"
-                outputDirectory = "$buildDir/dokka-gfm"
-            }
-        }
-
-        val dokkaGitHubUpload by tasks.creating {
-            group = "mirai"
-
-            val dokkaTaskName = "dokka"
-
-            dependsOn(tasks.getByName(dokkaTaskName))
-            doFirst {
-                val baseDir = file("./build/$dokkaTaskName/${project.name}")
-
-                timeout.set(Duration.ofHours(6))
-                file("build/$dokkaTaskName/").walk()
-                    .filter { it.isFile }
-                    .map { old ->
-                        if (old.name == "index.md") File(old.parentFile, "README.md").also { new -> old.renameTo(new) }
-                        else old
-                    }
-                    // optimize md
-                    .forEach { file ->
-                        if (file.endsWith(".md")) {
-                            file.writeText(
-                                file.readText().replace("index.md", "README.md", ignoreCase = true)
-                                    .replace(Regex("""```\n([\s\S]*?)```""")) {
-                                        "\n" + """
-                                    ```kotlin
-                                    $it
-                                    ```
-                                """.trimIndent()
-                                    })
-                        } /* else if (file.name == "README.md") {
-                            file.writeText(file.readText().replace(Regex("""(\n\n\|\s)""")) {
-                                "\n\n" + """"
-                                    |||
-                                    |:----------------------------------------------------------------------------------------|:---------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------|
-                                    | 
-                                """.trimIndent()
-                            })
-                        }*/
-                        val filename = file.toRelativeString(baseDir)
-                        println("Uploading file $filename")
-                        runCatching {
-                            upload.GitHub.upload(
-                                file,
-                                project,
-                                "mirai-doc",
-                                "${project.name}/${project.version}/$filename"
-                            )
-                        }.exceptionOrNull()?.let {
-                            System.err.println("GitHub Upload failed")
-                            it.printStackTrace() // force show stacktrace
-                            throw it
-                        }
-                    }
-            }
-        }
-
-        val cuiCloudUpload by tasks.creating {
-            group = "mirai"
-            dependsOn(shadowJvmJar)
-
-            doFirst {
-                timeout.set(Duration.ofHours(3))
-                findLatestFile().let { (_, file) ->
-                    val filename = file.name
-                    println("Uploading file $filename")
-                    runCatching {
-                        upload.CuiCloud.upload(
-                            file,
-                            project
-                        )
-                    }.exceptionOrNull()?.let {
-                        System.err.println("CuiCloud Upload failed")
-                        it.printStackTrace() // force show stacktrace
-                        throw it
-                    }
-                }
             }
 
+            /*
+        this.manifest {
+            this.attributes(
+                "Manifest-Version" to 1,
+                "Implementation-Vendor" to "Mamoe Technologies",
+                "Implementation-Title" to this.name.toString(),
+                "Implementation-Version" to this.version.toString()
+            )
+        }*/
         }
     }
-
-    afterEvaluate {
-        tasks.filterIsInstance<DokkaTask>().forEach { task ->
-            with(task) {
-                configuration {
-                    perPackageOption {
-                        prefix = "net.mamoe.mirai"
-                        skipDeprecated = true
-                    }
-                    perPackageOption {
-                        prefix = "net.mamoe.mirai.internal"
-                        suppress = true
-                    }
-                    perPackageOption {
-                        prefix = "net.mamoe.mirai.event.internal"
-                        suppress = true
-                    }
-                    perPackageOption {
-                        prefix = "net.mamoe.mirai.utils.internal"
-                        suppress = true
-                    }
-                    perPackageOption {
-                        prefix = "net.mamoe.mirai.qqandroid.utils"
-                        suppress = true
-                    }
-                    perPackageOption {
-                        prefix = "net.mamoe.mirai.qqandroid.contact"
-                        suppress = true
-                    }
-                    perPackageOption {
-                        prefix = "net.mamoe.mirai.qqandroid.message"
-                        suppress = true
-                    }
-                    perPackageOption {
-                        prefix = "net.mamoe.mirai.qqandroid.network"
-                        suppress = true
-                    }
-                }
-            }
-        }
-    }
-}
-
-
-fun Project.findLatestFile(): Map.Entry<String, File> {
-    return File(projectDir, "build/libs").walk()
-        .filter { it.isFile }
-        .onEach { println("all files=$it") }
-        .filter { it.name.matches(Regex("""${project.name}-[0-9][0-9]*(\.[0-9]*)*.*\.jar""")) }
-        .onEach { println("matched file: ${it.name}") }
-        .associateBy { it.nameWithoutExtension.substringAfterLast('-') }
-        .onEach { println("versions: $it") }
-        .maxBy { (version, _) ->
-            version.split('.').let {
-                if (it.size == 2) it + "0"
-                else it
-            }.reversed().foldIndexed(0) { index: Int, acc: Int, s: String ->
-                acc + 100.0.pow(index).toInt() * (s.toIntOrNull() ?: 0)
-            }
-        } ?: error("cannot find any file to upload")
 }
